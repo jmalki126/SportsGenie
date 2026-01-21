@@ -1,212 +1,224 @@
-# main.py
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 import os
+from typing import List, Optional
+from datetime import datetime
+
 import requests
-from dotenv import load_dotenv
-from typing import Optional, Dict, Any
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
-load_dotenv()
 
-app = FastAPI()
+# -----------------------------
+# App setup
+# -----------------------------
+app = FastAPI(title="SportsGenie API", version="1.0.0")
 
-# Allow Lovable (and browsers) to call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],   # ok for now; later you can lock this down to your Lovable domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ------------------------------------------------------------
-# SportRadar config
-# ------------------------------------------------------------
-SPORTRADAR_API_KEY = os.getenv("SPORTRADAR_API_KEY", "").strip()
-SPORTRADAR_ACCESS_LEVEL = os.getenv("SPORTRADAR_ACCESS_LEVEL", "trial").strip()
-SPORTRADAR_LANGUAGE = os.getenv("SPORTRADAR_LANGUAGE", "en").strip()
-
-# SportRadar NFL v7 base
-# Example: https://api.sportradar.com/nfl/official/trial/v7/en
-SR_BASE = f"https://api.sportradar.com/nfl/official/{SPORTRADAR_ACCESS_LEVEL}/v7/{SPORTRADAR_LANGUAGE}"
+SPORTTRADAR_API_KEY = os.getenv("SPORTTRADAR_API_KEY", "")
 
 
-def sr_get(path: str, params: Optional[Dict[str, Any]] = None):
-    """
-    Small helper that calls SportRadar and returns:
-      (json_data, None) on success
-      (None, JSONResponse) on error
-    """
-    if not SPORTRADAR_API_KEY:
-        return None, JSONResponse(status_code=400, content={"error": "SportRadar API key missing"})
+# -----------------------------
+# Response models (clean API)
+# -----------------------------
+class Team(BaseModel):
+    code: str
+    name: Optional[str] = None
 
-    p: Dict[str, Any] = params.copy() if params else {}
-    p["api_key"] = SPORTRADAR_API_KEY
 
-    url = f"{SR_BASE}{path}"
+class GenieInfo(BaseModel):
+    pick: str
+    win_probability: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0, le=1)
+    model_version: str = "v1"
+
+
+class MarketInfo(BaseModel):
+    spread: Optional[float] = None
+    total: Optional[float] = None
+    source: Optional[str] = None
+    last_updated_utc: Optional[datetime] = None
+
+
+class ExplainItem(BaseModel):
+    key: str
+    label: str
+    impact_points: float
+
+
+class GameOut(BaseModel):
+    game_id: str
+    season: int
+    week: int
+    season_type: str
+    status: str
+    kickoff_utc: str
+    kickoff_display: str
+    home: Team
+    away: Team
+    genie: GenieInfo
+    market: MarketInfo
+    explain: List[ExplainItem]
+
+
+class GamesResponse(BaseModel):
+    season: int
+    week: int
+    season_type: str
+    games: List[GameOut]
+
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def _require_api_key() -> str:
+    if not SPORTTRADAR_API_KEY:
+        raise HTTPException(status_code=500, detail="SPORTTRADAR_API_KEY not set on server")
+    return SPORTTRADAR_API_KEY
+
+
+def _sr_get_json(url: str, params: Optional[dict] = None) -> dict:
+    key = _require_api_key()
+    p = dict(params or {})
+    p["api_key"] = key
+
     try:
         r = requests.get(url, params=p, timeout=20)
-        if r.status_code != 200:
-            return None, JSONResponse(
-                status_code=r.status_code,
-                content={
-                    "error": "SportRadar request failed",
-                    "status": r.status_code,
-                    "url": url,
-                    "body": r.text[:500],
-                },
-            )
-        return r.json(), None
-    except Exception as e:
-        return None, JSONResponse(
-            status_code=500,
-            content={"error": "SportRadar request exception", "message": str(e)},
-        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"SportRadar request failed: {str(e)}")
+
+    if r.status_code >= 400:
+        # keep it simple but readable
+        raise HTTPException(status_code=502, detail=f"SportRadar error {r.status_code}: {r.text[:250]}")
+
+    try:
+        return r.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="SportRadar returned non JSON response")
 
 
-def safe_team_abbr(game: Dict[str, Any], side: str) -> str:
+def _iso(dt_str: str) -> str:
+    # If SportRadar returns ISO already, pass it through.
+    # If empty or None, return empty string.
+    return dt_str or ""
+
+
+def _to_game_out(raw: dict, season: int, week: int, season_type: str) -> GameOut:
+    game_id = raw.get("game_id") or raw.get("id") or ""
+    home_code = raw.get("home_team") or raw.get("home") or ""
+    away_code = raw.get("away_team") or raw.get("away") or ""
+
+    kickoff_utc = _iso(raw.get("kickoff_utc") or raw.get("scheduled") or "")
+    kickoff_display = raw.get("kickoff_display") or kickoff_utc
+
+    # Defaults for now (your model can replace these later)
+    win_probability = float(raw.get("win_probability", 0.50))
+    confidence = float(raw.get("confidence", 0.50))
+
+    # Simple pick default
+    pick = raw.get("pick") or home_code or "TBD"
+
+    return GameOut(
+        game_id=game_id,
+        season=season,
+        week=week,
+        season_type=season_type,
+        status=raw.get("status", "scheduled"),
+        kickoff_utc=kickoff_utc,
+        kickoff_display=kickoff_display,
+        home=Team(code=home_code, name=raw.get("home_name")),
+        away=Team(code=away_code, name=raw.get("away_name")),
+        genie=GenieInfo(
+            pick=pick,
+            win_probability=win_probability,
+            confidence=confidence,
+            model_version=raw.get("model_version", "v1"),
+        ),
+        market=MarketInfo(),
+        explain=[
+            ExplainItem(key="team_strength_gap", label="Team strength gap", impact_points=float(raw.get("impact_team_strength_gap", 0.0))),
+            ExplainItem(key="home_field", label="Home field", impact_points=float(raw.get("impact_home_field", 0.0))),
+        ],
+    )
+
+
+def _extract_games(sr_payload: dict) -> List[dict]:
     """
-    SportRadar schedule games usually include:
-      game["home"]["abbr"] or ["alias"]
-      game["away"]["abbr"] or ["alias"]
-    We fall back safely.
+    Your SportRadar payload shape can vary depending on endpoint/package.
+    We try common patterns and fall back gracefully.
     """
-    t = game.get(side) or {}
-    return t.get("abbr") or t.get("alias") or t.get("name") or ""
+    if isinstance(sr_payload, dict):
+        if isinstance(sr_payload.get("games"), list):
+            return sr_payload["games"]
+        if isinstance(sr_payload.get("week"), dict) and isinstance(sr_payload["week"].get("games"), list):
+            return sr_payload["week"]["games"]
+        if isinstance(sr_payload.get("data"), dict) and isinstance(sr_payload["data"].get("games"), list):
+            return sr_payload["data"]["games"]
+    return []
 
 
-def map_schedule_game_to_frontend(game: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Normalize SportRadar schedule game into what your frontend expects.
-    """
-    scheduled = game.get("scheduled") or ""
-    return {
-        "game_id": game.get("id") or game.get("game_id") or "",
-        "away_team": safe_team_abbr(game, "away"),
-        "home_team": safe_team_abbr(game, "home"),
-        "kickoff_utc": scheduled,
-        "kickoff_display": scheduled,  # keep simple for now
-        "confidence": 0.50,           # placeholder until your model fills this
-        "source": "sportradar",
-    }
-
-
+# -----------------------------
+# Routes
+# -----------------------------
 @app.get("/health")
 def health():
     return {"ok": True}
 
 
-@app.get("/weeks")
-def weeks(season: int = 2024):
-    # Keep simple for now (frontend just needs something)
-    return [
-        {"week": 1, "season_type": "REG", "label": "Week 1", "game_count": 16},
-        {"week": 2, "season_type": "REG", "label": "Week 2", "game_count": 16},
-        {"week": 3, "season_type": "REG", "label": "Week 3", "game_count": 16},
-    ]
-
-
-@app.get("/games")
-def games(season: int = 2024, week: int = 1, season_type: str = "REG"):
-    """
-    Returns schedule for a week.
-
-    Example:
-      /games?season=2024&week=1&season_type=REG
-    """
-    path = f"/games/{season}/{season_type}/{week}/schedule.json"
-    data, err = sr_get(path)
-    if err:
-        return err
-
-    week_obj = data.get("week") or {}
-    raw_games = week_obj.get("games") or []
-
-    games_list = [map_schedule_game_to_frontend(g) for g in raw_games]
-
-    return {"season": season, "week": week, "season_type": season_type, "games": games_list}
-
-
-@app.get("/game")
-def game(
-    game_id: str,
-    season: int = 2024,
-    week: int = 1,
-    season_type: str = "REG",
-    home_team_key: str = "",
-    away_team_key: str = "",
-    as_of_date: str = "",
+@app.get("/games", response_model=GamesResponse)
+def games(
+    season: int = Query(..., description="NFL season year, ex: 2024"),
+    week: int = Query(..., description="NFL week number, ex: 1"),
+    season_type: str = Query("REG", description="REG, PRE, PST"),
 ):
     """
-    Looks up a single game by ID by searching within the weekly schedule.
-    """
-    path = f"/games/{season}/{season_type}/{week}/schedule.json"
-    data, err = sr_get(path)
-    if err:
-        return err
+    Returns a clean, frontend friendly list of games.
 
-    week_obj = data.get("week") or {}
-    raw_games = week_obj.get("games") or []
+    IMPORTANT:
+    - You must be on a SportRadar package that supports the endpoint used below.
+    - If this endpoint differs from your current one, tell me what URL you were using and I will swap it.
+    """
+
+    # SportRadar NFL weekly schedule endpoint (commonly used):
+    # If your account uses a different endpoint, paste yours and I will update it.
+    url = f"https://api.sportradar.com/nfl/official/trial/v7/en/games/{season}/{season_type}/{week}/schedule.json"
+
+    sr = _sr_get_json(url)
+    raw_games = _extract_games(sr)
+
+    if not raw_games:
+        # Some SR endpoints put games at top level, some nest differently.
+        # If you hit this, show me the sr keys and I will adjust.
+        return GamesResponse(season=season, week=week, season_type=season_type, games=[])
+
+    cleaned = [_to_game_out(g, season, week, season_type) for g in raw_games]
+    return GamesResponse(season=season, week=week, season_type=season_type, games=cleaned)
+
+
+@app.get("/games/{game_id}", response_model=GameOut)
+def game_by_id(
+    game_id: str,
+    season: int = Query(..., description="Season year used to locate the game"),
+    week: int = Query(..., description="Week used to locate the game"),
+    season_type: str = Query("REG", description="REG, PRE, PST"),
+):
+    """
+    Fetch a week schedule and return one game by id.
+    This is simple and reliable for now.
+    """
+    url = f"https://api.sportradar.com/nfl/official/trial/v7/en/games/{season}/{season_type}/{week}/schedule.json"
+    sr = _sr_get_json(url)
+    raw_games = _extract_games(sr)
 
     for g in raw_games:
-        if g.get("id") == game_id:
-            mapped = map_schedule_game_to_frontend(g)
+        gid = g.get("game_id") or g.get("id")
+        if gid == game_id:
+            return _to_game_out(g, season, week, season_type)
 
-            venue = g.get("venue") or {}
-            mapped["venue_name"] = venue.get("name") or ""
-            mapped["venue_city"] = venue.get("city") or ""
-            mapped["venue_state"] = venue.get("state") or ""
-
-            mapped["status"] = g.get("status") or ""
-            mapped["scheduled"] = g.get("scheduled") or ""
-
-            return mapped
-
-    return JSONResponse(
-        status_code=404,
-        content={"detail": "Game not found in that week. Check season, week, season_type, and game_id."},
-    )
-
-
-@app.get("/simulate")
-def simulate(
-    game_id: str,
-    season: int = 2024,
-    week: int = 1,
-    model_version: str = "v1",
-    n_sims: int = 10000,
-):
-    # Placeholder until your model is wired
-    return {
-        "game_id": game_id,
-        "season": season,
-        "week": week,
-        "model_version": model_version,
-        "n_sims": n_sims,
-        "home_win_prob": 0.57,
-        "proj_spread_home": -2.5,
-        "proj_total": 46.0,
-        "source": "placeholder",
-    }
-
-
-@app.get("/explain")
-def explain(
-    game_id: str,
-    season: int = 2024,
-    week: int = 1,
-    model_version: str = "v1",
-):
-    # Placeholder until your model explanations are wired
-    return {
-        "game_id": game_id,
-        "season": season,
-        "week": week,
-        "model_version": model_version,
-        "drivers": [
-            {"name": "Team strength gap", "impact_points": 2.1, "note": "Placeholder explanation."},
-            {"name": "Home field", "impact_points": 1.5, "note": "Placeholder explanation."},
-        ],
-        "source": "placeholder",
-    }
+    raise HTTPException(status_code=404, detail="Game not found")
