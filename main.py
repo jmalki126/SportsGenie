@@ -9,6 +9,9 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="SportsGenie API", version="1.0.0")
+@app.get("/")
+def root():
+    return {"status": "ok"}
 
 # Allow your Lovable frontend to call this API
 app.add_middleware(
