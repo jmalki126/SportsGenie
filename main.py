@@ -52,6 +52,7 @@ def _to_display(dt_str: Optional[str]) -> str:
 
 
 def _mock_games(season: int, week: int, season_type: str) -> List[Dict[str, Any]]:
+    # Small deterministic list so the UI always has something to render.
     pairs = [
         ("BAL", "KC"),
         ("GB", "PHI"),
@@ -95,9 +96,7 @@ def _sportradar_schedule_url(season: int, week: int, season_type: str) -> str:
     )
 
 
-def _try_fetch_sportradar_games(
-    season: int, week: int, season_type: str
-) -> Optional[List[Dict[str, Any]]]:
+def _try_fetch_sportradar_games(season: int, week: int, season_type: str) -> Optional[List[Dict[str, Any]]]:
     if not SPORTRADAR_API_KEY:
         return None
 
@@ -328,37 +327,44 @@ def accuracy(
     Historical accuracy summary.
 
     This is deterministic mock data until real results are stored.
-    (It lets you build the UI now.)
+    It lets you build and trust-test the UI now.
     """
     seed = f"accuracy:{season}:{season_type}:{weeks_back}:{model_version}"
 
     def clamp(x: float, lo: float, hi: float) -> float:
         return max(lo, min(hi, x))
 
-    ats_accuracy = round(clamp(0.56 + ( _stable_rand(seed + ":ats") - 0.5) * 0.12, 0.45, 0.70), 3)
+    ats_accuracy = round(clamp(0.56 + (_stable_rand(seed + ":ats") - 0.5) * 0.12, 0.45, 0.70), 3)
     totals_accuracy = round(clamp(0.54 + (_stable_rand(seed + ":tot") - 0.5) * 0.12, 0.45, 0.70), 3)
     high_conf_accuracy = round(clamp(0.62 + (_stable_rand(seed + ":high") - 0.5) * 0.14, 0.48, 0.78), 3)
 
-    games = int(weeks_back * 16)
+    games_count = int(weeks_back * 16)
 
     buckets = [
         ("0.50–0.59", round(clamp(0.52 + (_stable_rand(seed + ":b1") - 0.5) * 0.10, 0.45, 0.80), 3)),
         ("0.60–0.69", round(clamp(0.57 + (_stable_rand(seed + ":b2") - 0.5) * 0.10, 0.45, 0.85), 3)),
         ("0.70–0.79", round(clamp(0.62 + (_stable_rand(seed + ":b3") - 0.5) * 0.10, 0.45, 0.90), 3)),
-        ("0.80+",     round(clamp(0.68 + (_stable_rand(seed + ":b4") - 0.5) * 0.10, 0.45, 0.95), 3)),
+        ("0.80+", round(clamp(0.68 + (_stable_rand(seed + ":b4") - 0.5) * 0.10, 0.45, 0.95), 3)),
     ]
 
     return {
         "season": season,
         "season_type": season_type,
-        "weeks_back": weeks_back,
+        "weeks_back": int(weeks_back),
         "model_version": model_version,
         "summary": {
-            "games": games,
+            "games": games_count,
             "ats_accuracy": ats_accuracy,
             "totals_accuracy": totals_accuracy,
             "high_confidence_accuracy": high_conf_accuracy,
-        }@app.get("/accuracy/trend")
+        },
+        "by_confidence": [{"bucket": b, "accuracy": a} for (b, a) in buckets],
+        "status": "ok",
+        "note": "Demo metrics until real outcomes + market lines are stored.",
+    }
+
+
+@app.get("/accuracy/trend")
 def accuracy_trend(
     season: int = Query(2024),
     season_type: str = Query("REG"),
@@ -366,7 +372,7 @@ def accuracy_trend(
     model_version: str = Query("v1"),
 ):
     """
-    Weekly trend points for Historical Accuracy charts.
+    Weekly trend points for charts.
 
     Demo data for now (stable/deterministic), so UI can chart it today.
     Later, replace with real graded results.
@@ -377,12 +383,9 @@ def accuracy_trend(
     def clamp(x: float, lo: float, hi: float) -> float:
         return max(lo, min(hi, x))
 
-    points = []
-    # Generate weeks 1..weeks_back (or you can reverse later in UI)
+    points: List[Dict[str, Any]] = []
     for w in range(1, weeks_back + 1):
-        # Per-week stable randomness
         base = f"{seed}:w{w}"
-
         ats = clamp(0.55 + (_stable_rand(base + ":ats") - 0.5) * 0.16, 0.45, 0.75)
         totals = clamp(0.53 + (_stable_rand(base + ":tot") - 0.5) * 0.16, 0.45, 0.75)
 
@@ -403,9 +406,4 @@ def accuracy_trend(
         "points": points,
         "status": "ok",
         "note": "Demo trend data until real outcomes + market lines are stored.",
-    }
-
-        "by_confidence": [{"bucket": b, "accuracy": a} for (b, a) in buckets],
-        "status": "ok",
-        "note": "Demo metrics until real outcomes + market lines are stored.",
     }
