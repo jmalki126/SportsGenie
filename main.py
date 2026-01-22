@@ -188,6 +188,7 @@ def games(
         "season_type": season_type,
         "as_of_date": as_of_date,
         "games": out_games,
+        "status": "ok",
     }
 
 
@@ -269,65 +270,18 @@ def explain(
     }
 
 
-@app.get("/accuracy")
-def accuracy(
-    season: int = Query(2024),
-    season_type: str = Query("REG"),
-    weeks_back: int = Query(10),
-    model_version: str = Query("v1"),
-):
-    """
-    Historical accuracy summary.
-    This is deterministic mock data until real results are stored.
-    """
-
-    total_games = weeks_back * 14  # approx games per week
-    rng_seed = f"{season}:{season_type}:{weeks_back}:{model_version}"
-
-    def win_rate(seed: str, base: float):
-        return round(min(0.75, max(0.45, base + (_stable_rand(seed) - 0.5) * 0.1)), 2)
-
-    ats_accuracy = win_rate(rng_seed + ":ats", 0.57)
-    high_conf_accuracy = win_rate(rng_seed + ":high", 0.66)
-
-    confidence_buckets = [
-        ("0.50–0.59", win_rate(rng_seed + ":50", 0.52)),
-        ("0.60–0.69", win_rate(rng_seed + ":60", 0.57)),
-        ("0.70–0.79", win_rate(rng_seed + ":70", 0.62)),
-        ("0.80+", win_rate(rng_seed + ":80", 0.68)),
-    ]
-
-    return {
-        "season": season,
-        "season_type": season_type,
-        "weeks_back": weeks_back,
-        "model_version": model_version,
-        "summary": {
-            "games": total_games,
-            "ats_accuracy": ats_accuracy,
-            "high_confidence_accuracy": high_conf_accuracy,
-        },
-        "by_confidence": [
-            {"bucket": b, "accuracy": a} for b, a in confidence_buckets
-        ],
-        "status": "ok",
-    }
-
 @app.get("/best-bets")
 def best_bets(
     season: int = Query(2024),
     week: int = Query(1),
     season_type: str = Query("REG"),
-    top_n: int = Query(5),
+    top_n: int = Query(5, ge=1, le=20),
 ):
     """
-    Returns the top games for the week by 'edge'.
+    Returns top games by edge.
 
     Placeholder now (no sportsbook market lines yet):
       edge = confidence * 100
-
-    Later, when you add sportsbook lines:
-      edge = abs(model_spread - market_spread) * confidence
     """
     sr_games = _try_fetch_sportradar_games(season, week, season_type)
     games_list = sr_games if sr_games is not None else _mock_games(season, week, season_type)
@@ -351,14 +305,13 @@ def best_bets(
         )
 
     bets.sort(key=lambda x: x.get("edge", 0.0), reverse=True)
-    n = max(1, min(20, int(top_n)))
-    bets = bets[:n]
+    bets = bets[: int(top_n)]
 
     return {
         "season": season,
         "week": week,
         "season_type": season_type,
-        "top_n": n,
+        "top_n": int(top_n),
         "best_bets": bets,
         "status": "ok",
     }
@@ -368,50 +321,32 @@ def best_bets(
 def accuracy(
     season: int = Query(2024),
     season_type: str = Query("REG"),
-    weeks_back: int = Query(10),
+    weeks_back: int = Query(10, ge=1, le=30),
     model_version: str = Query("v1"),
-    min_confidence: float = Query(0.60),
 ):
     """
-    Placeholder historical accuracy metrics.
-    This returns stable, deterministic numbers so the UI can be built now.
-    Later, replace this with real graded results.
+    Historical accuracy summary.
+
+    This is deterministic mock data until real results are stored.
+    (It lets you build the UI now.)
     """
-    weeks_back = max(1, min(18, int(weeks_back)))
-    seed_base = f"acc:{season}:{season_type}:{model_version}"
+    seed = f"accuracy:{season}:{season_type}:{weeks_back}:{model_version}"
 
-    ats = round(0.52 + 0.10 * (_stable_rand(seed_base + ":ats") - 0.5), 3)
-    totals = round(0.51 + 0.10 * (_stable_rand(seed_base + ":totals") - 0.5), 3)
-    high_conf_ats = round(ats + 0.03 + 0.05 * (_stable_rand(seed_base + ":hc") - 0.5), 3)
+    def clamp(x: float, lo: float, hi: float) -> float:
+        return max(lo, min(hi, x))
 
-    ats = max(0.45, min(0.65, ats))
-    totals = max(0.45, min(0.65, totals))
-    high_conf_ats = max(0.48, min(0.70, high_conf_ats))
+    ats_accuracy = round(clamp(0.56 + ( _stable_rand(seed + ":ats") - 0.5) * 0.12, 0.45, 0.70), 3)
+    totals_accuracy = round(clamp(0.54 + (_stable_rand(seed + ":tot") - 0.5) * 0.12, 0.45, 0.70), 3)
+    high_conf_accuracy = round(clamp(0.62 + (_stable_rand(seed + ":high") - 0.5) * 0.14, 0.48, 0.78), 3)
+
+    games = int(weeks_back * 16)
 
     buckets = [
-        {
-            "range": "50-59%",
-            "pred": 0.55,
-            "actual": round(0.53 + 0.06 * (_stable_rand(seed_base + ":b1") - 0.5), 3),
-        },
-        {
-            "range": "60-69%",
-            "pred": 0.65,
-            "actual": round(0.64 + 0.06 * (_stable_rand(seed_base + ":b2") - 0.5), 3),
-        },
-        {
-            "range": "70-79%",
-            "pred": 0.75,
-            "actual": round(0.73 + 0.06 * (_stable_rand(seed_base + ":b3") - 0.5), 3),
-        },
-        {
-            "range": "80-89%",
-            "pred": 0.85,
-            "actual": round(0.82 + 0.06 * (_stable_rand(seed_base + ":b4") - 0.5), 3),
-        },
+        ("0.50–0.59", round(clamp(0.52 + (_stable_rand(seed + ":b1") - 0.5) * 0.10, 0.45, 0.80), 3)),
+        ("0.60–0.69", round(clamp(0.57 + (_stable_rand(seed + ":b2") - 0.5) * 0.10, 0.45, 0.85), 3)),
+        ("0.70–0.79", round(clamp(0.62 + (_stable_rand(seed + ":b3") - 0.5) * 0.10, 0.45, 0.90), 3)),
+        ("0.80+",     round(clamp(0.68 + (_stable_rand(seed + ":b4") - 0.5) * 0.10, 0.45, 0.95), 3)),
     ]
-    for b in buckets:
-        b["actual"] = max(0.45, min(0.95, b["actual"]))
 
     return {
         "season": season,
@@ -419,11 +354,12 @@ def accuracy(
         "weeks_back": weeks_back,
         "model_version": model_version,
         "summary": {
-            "ats_win_rate": ats,
-            "totals_accuracy": totals,
-            "high_confidence_ats_win_rate": high_conf_ats,
-            "min_confidence": float(min_confidence),
+            "games": games,
+            "ats_accuracy": ats_accuracy,
+            "totals_accuracy": totals_accuracy,
+            "high_confidence_accuracy": high_conf_accuracy,
         },
-        "calibration": buckets,
+        "by_confidence": [{"bucket": b, "accuracy": a} for (b, a) in buckets],
         "status": "ok",
+        "note": "Demo metrics until real outcomes + market lines are stored.",
     }
