@@ -358,7 +358,53 @@ def accuracy(
             "ats_accuracy": ats_accuracy,
             "totals_accuracy": totals_accuracy,
             "high_confidence_accuracy": high_conf_accuracy,
-        },
+        }@app.get("/accuracy/trend")
+def accuracy_trend(
+    season: int = Query(2024),
+    season_type: str = Query("REG"),
+    weeks_back: int = Query(10, ge=1, le=30),
+    model_version: str = Query("v1"),
+):
+    """
+    Weekly trend points for Historical Accuracy charts.
+
+    Demo data for now (stable/deterministic), so UI can chart it today.
+    Later, replace with real graded results.
+    """
+    weeks_back = int(weeks_back)
+    seed = f"trend:{season}:{season_type}:{weeks_back}:{model_version}"
+
+    def clamp(x: float, lo: float, hi: float) -> float:
+        return max(lo, min(hi, x))
+
+    points = []
+    # Generate weeks 1..weeks_back (or you can reverse later in UI)
+    for w in range(1, weeks_back + 1):
+        # Per-week stable randomness
+        base = f"{seed}:w{w}"
+
+        ats = clamp(0.55 + (_stable_rand(base + ":ats") - 0.5) * 0.16, 0.45, 0.75)
+        totals = clamp(0.53 + (_stable_rand(base + ":tot") - 0.5) * 0.16, 0.45, 0.75)
+
+        points.append(
+            {
+                "week": w,
+                "ats_accuracy": round(ats, 3),
+                "totals_accuracy": round(totals, 3),
+            }
+        )
+
+    return {
+        "season": season,
+        "season_type": season_type,
+        "weeks_back": weeks_back,
+        "model_version": model_version,
+        "updated_at": _now_iso(),
+        "points": points,
+        "status": "ok",
+        "note": "Demo trend data until real outcomes + market lines are stored.",
+    }
+
         "by_confidence": [{"bucket": b, "accuracy": a} for (b, a) in buckets],
         "status": "ok",
         "note": "Demo metrics until real outcomes + market lines are stored.",
