@@ -32,6 +32,7 @@ def _stable_rand(seed: str) -> float:
 
 
 def _mock_games(season: int, week: int, season_type: str) -> List[Dict[str, Any]]:
+    # Small deterministic list so the UI always has something to render.
     pairs = [
         ("BAL", "KC"),
         ("GB", "PHI"),
@@ -64,7 +65,7 @@ def _mock_games(season: int, week: int, season_type: str) -> List[Dict[str, Any]
 
 
 def _sportradar_schedule_url(season: int, week: int, season_type: str) -> str:
-    # Attempt common schedule path; if your plan/path differs, we fall back to mock data.
+    # Common-ish NFL schedule path. If your plan/path differs, code falls back to mock data.
     # Example:
     # https://api.sportradar.com/nfl/official/trial/v7/en/games/2024/REG/1/schedule.json?api_key=...
     return (
@@ -85,6 +86,7 @@ def _try_fetch_sportradar_games(season: int, week: int, season_type: str) -> Opt
 
         data = r.json()
 
+        # Try to locate games in a few common shapes.
         raw_games = None
         if isinstance(data, dict):
             raw_games = data.get("games") or data.get("week", {}).get("games")
@@ -136,7 +138,55 @@ def _try_fetch_sportradar_games(season: int, week: int, season_type: str) -> Opt
         return None
 
 
-# Render sometimes does a HEAD / check. Add both so you don't see 405 noise.
+@app.get("/best-bets")
+def best_bets(
+    season: int = Query(2024),
+    week: int = Query(1),
+    season_type: str = Query("REG"),
+    top_n: int = Query(5),
+):
+    """
+    Returns the top games for the week by 'edge'.
+
+    Placeholder now (no sportsbook market lines yet):
+      edge = confidence * 100
+
+    Later, when you add sportsbook lines:
+      edge = abs(model_spread - market_spread) * confidence
+    """
+    sr_games = _try_fetch_sportradar_games(season, week, season_type)
+    games_list = sr_games if sr_games is not None else _mock_games(season, week, season_type)
+
+    bets: List[Dict[str, Any]] = []
+    for g in games_list:
+        confidence = float(g.get("confidence", 0.0))
+        edge_score = round(confidence * 100.0, 1)
+
+        bets.append(
+            {
+                "game_id": g.get("game_id"),
+                "away_team": g.get("away_team"),
+                "home_team": g.get("home_team"),
+                "kickoff_utc": g.get("kickoff_utc"),
+                "kickoff_display": g.get("kickoff_display"),
+                "confidence": confidence,
+                "edge": edge_score,
+                "source": g.get("source", "unknown"),
+            }
+        )
+
+    bets.sort(key=lambda x: x.get("edge", 0), reverse=True)
+    bets = bets[: max(1, min(20, int(top_n)))]
+
+    return {
+        "season": season,
+        "week": week,
+        "season_type": season_type,
+        "top_n": top_n,
+        "best_bets": bets,
+    }
+
+
 @app.get("/")
 def root():
     return {"status": "ok", "service": "sportsgenie", "time": _now_iso()}
@@ -144,6 +194,7 @@ def root():
 
 @app.head("/")
 def root_head():
+    # Render sometimes does a HEAD / check. Returning empty is fine.
     return {}
 
 
@@ -159,6 +210,8 @@ def games(
     season_type: str = Query("REG"),
     as_of_date: Optional[str] = Query(None),
 ):
+    # Return schedule games the frontend can render.
+    # as_of_date is accepted for compatibility even if not used.
     sr_games = _try_fetch_sportradar_games(season, week, season_type)
     out_games = sr_games if sr_games is not None else _mock_games(season, week, season_type)
 
@@ -179,6 +232,7 @@ def simulate(
     model_version: str = Query("v1"),
     n_sims: int = Query(10000),
 ):
+    # Deterministic "model" so UI works even before real model wiring is done.
     if not game_id or game_id.strip() in {"...", "null", "undefined"}:
         raise HTTPException(status_code=400, detail="game_id is required")
 
