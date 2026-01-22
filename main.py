@@ -26,6 +26,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _to_display(dt_str: str) -> str:
+    """
+    Handles:
+      - "2024-09-08T17:00:00+00:00"
+      - "2024-09-08T17:00:00Z"
+    Returns:
+      - "Sun Sep 08, 05:00 PM UTC"
+    """
+    s = dt_str.replace("Z", "+00:00")
+    dt = datetime.fromisoformat(s)
+    return dt.strftime("%a %b %d, %I:%M %p UTC")
+
+
 def _stable_rand(seed: str) -> float:
     h = hashlib.sha256(seed.encode("utf-8")).hexdigest()
     return int(h[:8], 16) / 0xFFFFFFFF
@@ -56,7 +69,7 @@ def _mock_games(season: int, week: int, season_type: str) -> List[Dict[str, Any]
                 "away_team": away,
                 "home_team": home,
                 "kickoff_utc": kickoff.isoformat().replace("+00:00", "Z"),
-                "kickoff_display": kickoff.strftime("%Y-%m-%d %H:%M UTC"),
+                "kickoff_display": _to_display(kickoff.isoformat().replace("+00:00", "Z")),
                 "confidence": round(0.45 + 0.45 * _stable_rand(game_id), 2),
                 "source": "mock",
             }
@@ -74,7 +87,9 @@ def _sportradar_schedule_url(season: int, week: int, season_type: str) -> str:
     )
 
 
-def _try_fetch_sportradar_games(season: int, week: int, season_type: str) -> Optional[List[Dict[str, Any]]]:
+def _try_fetch_sportradar_games(
+    season: int, week: int, season_type: str
+) -> Optional[List[Dict[str, Any]]]:
     if not SPORTRADAR_API_KEY:
         return None
 
@@ -111,15 +126,11 @@ def _try_fetch_sportradar_games(season: int, week: int, season_type: str) -> Opt
             away = away_obj.get("alias") if isinstance(away_obj, dict) else str(away_obj)
 
             scheduled = g.get("scheduled") or g.get("kickoff") or g.get("scheduled_at")
-            if not gid or not home or not away:
+            if not gid or not home or not away or not scheduled:
                 continue
 
             kickoff_utc = scheduled
-            kickoff_display = (
-                kickoff_utc.replace("T", " ").replace("Z", " UTC")
-                if isinstance(kickoff_utc, str) and kickoff_utc.endswith("Z")
-                else str(kickoff_utc)
-            )
+            kickoff_display = _to_display(kickoff_utc) if isinstance(kickoff_utc, str) else str(kickoff_utc)
 
             games.append(
                 {
